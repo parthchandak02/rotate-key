@@ -1,0 +1,24 @@
+# Copy to ~/.config/rotate-key/config.toml. Every setting is optional.
+
+# Folders searched for .env files. Symlinks are not followed, so list the real paths.
+roots = ["~", "/Volumes/Work/projects"]
+depth = 6
+
+# Non-.env files that may hold copies of a key (CLI settings, agent configs).
+extra_files = ["~/.config/*/config.toml", "~/.config/my-cli/credentials.json"]
+
+# Copies inside these folders are reported but never rewritten.
+backup_dirs = ["state-snapshots", "backups", "backup"]
+
+[restart]
+# LaunchAgent labels restarted after a rotation (launchctl kickstart -k).
+launchd = ["com.example.my-agent"]
+# "auto": restart pm2 processes whose environment contains the key, then pm2 save.
+pm2 = "auto"
+# Anything else to run afterwards.
+commands = ["docker compose -f ~/services/compose.yml up -d"]
+
+# Your own provider checks. {k} is replaced by the key; use a free, read-only endpoint.
+[checks.MY_SERVICE_TOKEN]
+url = "https://api.example.com/v1/me"
+header = "Authorization: Bearer {k}"
