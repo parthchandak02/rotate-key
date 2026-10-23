@@ -346,7 +346,7 @@ def doctor(cfg: dict, fix: bool):
 
     def report(level, msg, how=""):
         nonlocal issues
-        issues += level != "ok"
+        issues += level in ("warn", "FAIL")
         print(f"[{level:^5}] {msg}" + (f"\n        fix: {how}" if how else ""))
 
     secrets = inventory(cfg)
@@ -431,21 +431,44 @@ def doctor(cfg: dict, fix: bool):
         fv = subprocess.run(["fdesetup", "status"], capture_output=True, text=True).stdout
         report("ok" if "On" in fv else "FAIL", "FileVault " + ("on" if "On" in fv else "OFF"),
                "" if "On" in fv else "System Settings > Privacy & Security > FileVault")
-        fw = subprocess.run(["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"], capture_output=True, text=True).stdout
-        if "disabled" in fw:
-            report("warn", "macOS firewall is off", "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on")
+        sf = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+        fw_on = "enabled" in subprocess.run([sf, "--getglobalstate"], capture_output=True, text=True).stdout
+        if fw_on:
+            report("ok", "macOS firewall on")
+        else:
+            report("warn", "macOS firewall is off", f"sudo {sf} --setglobalstate on")
         net = subprocess.run(["netstat", "-an", "-p", "tcp"], capture_output=True, text=True).stdout
-        if re.search(r"\*\.22\s.*LISTEN", net):
-            report("warn", "Remote Login (SSH) is on: anyone on your network can try to log in",
-                   "turn it off in System Settings > General > Sharing, or restrict it to your own keys and a VPN")
+        ssh_on = re.search(r"\*\.22\s.*LISTEN", net)
+        if ssh_on:
+            ak = HOME / ".ssh/authorized_keys"
+            n = sum(1 for l in ak.read_text().splitlines() if l.strip() and not l.startswith("#")) if ak.exists() else 0
+            report("info", f"Remote Login (SSH) is on, {n} key(s) allowed in ~/.ssh/authorized_keys",
+                   "fine if you use it; keep authorized_keys to keys you recognise, and prefer reaching it over a VPN")
         if re.search(r"\*\.(5900|3283)\s.*LISTEN", net):
-            report("warn", "Screen Sharing / Remote Management is on",
-                   "turn it off in System Settings > General > Sharing if you don't use it")
+            report("info", "Screen Sharing / Remote Management is on", "fine if you use it; turn it off in System Settings > General > Sharing if not")
         ls = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], capture_output=True, text=True).stdout.splitlines()[1:]
-        wide = sorted({f"{l.split()[0]}:{l.split()[8].rsplit(':', 1)[-1]}" for l in ls if re.search(r"\s(\*|0\.0\.0\.0|\[::\]):\d+", l)})
-        if wide:
-            report("warn", f"{len(wide)} services accept connections from your network: {', '.join(wide[:8])}",
-                   "bind dev servers to 127.0.0.1; turn off Remote Login/Screen Sharing if unused (System Settings > General > Sharing)")
+        wide = {}
+        for l in ls:
+            parts = l.split()
+            if len(parts) > 8 and re.search(r"^(\*|0\.0\.0\.0|\[::\]):\d+$", parts[8]):
+                wide[f"{parts[0]}:{parts[8].rsplit(':', 1)[-1]}"] = parts[1]
+        if wide and not fw_on:
+            report("warn", f"{len(wide)} services accept connections from your network: {', '.join(sorted(wide)[:8])}",
+                   "turn the firewall on, and bind dev servers to 127.0.0.1")
+        elif wide:
+            apps = subprocess.run([sf, "--listapps"], capture_output=True, text=True).stdout
+            exposed = []
+            for name, pid in sorted(wide.items()):
+                exe = subprocess.run(["ps", "-o", "comm=", "-p", pid], capture_output=True, text=True).stdout.strip()
+                signed = "Authority=" in subprocess.run(["codesign", "-dvv", exe], capture_output=True, text=True).stderr
+                if signed or any(seg and seg in apps for seg in (exe, exe.split("/Contents/")[0])):
+                    exposed.append(name)
+            if exposed:
+                report("info", f"firewall lets {len(exposed)} listening service(s) through: {', '.join(exposed[:8])}",
+                       "expected for things devices on your network use; remove others with socketfilterfw --remove")
+            blocked = len(wide) - len(exposed)
+            if blocked:
+                report("ok", f"firewall blocks outside connections to {blocked} other listening service(s)")
 
     print(f"\n{issues} issue(s)." + ("" if fix else " Run `rotate-key doctor --fix` for the ones marked fixable."))
 
