@@ -279,7 +279,8 @@ def restart_services(name: str, new: str, cfg: dict):
 
 def cmd_rotate(cfg: dict, name: str, dry: bool, pick: str | None):
     secrets = inventory(cfg)
-    matches = [(v, s) for v, s in secrets.items() if name in s["names"]]
+    matches = [(v, s) for v, s in secrets.items()
+               if name in s["names"] and any(not is_backup(f, cfg) for f in s["files"])]
     if not matches:
         sys.exit(f"No secret named {name} found. Run `rotate-key` to see what exists.")
     if len(matches) > 1 and not pick:
