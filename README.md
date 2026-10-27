@@ -83,6 +83,7 @@ rotate-key                          # every secret, its copies, and whether it s
 rotate-key OPENAI_API_KEY --dry-run # what a rotation would touch
 rotate-key OPENAI_API_KEY           # prompt, verify, replace everywhere, restart services
 rotate-key OPENAI_API_KEY --id c57182   # when one name has several different values
+rotate-key add ANTHROPIC_API_KEY    # new key: prompt, verify, append to one env file (--to FILE)
 rotate-key check GITHUB_TOKEN       # just the provider check
 rotate-key doctor                   # hygiene report; add --fix for the safe fixes
 ```
@@ -118,6 +119,7 @@ Optional, at `~/.config/rotate-key/config.toml`. See [`config.example.toml`](con
 | `depth` | `6` | How deep to search |
 | `extra_files` | `[]` | Globs for non-.env files that hold copies (CLI configs) |
 | `backup_dirs` | `state-snapshots`, `backups`, `backup` | Copies here are reported, not rewritten |
+| `add_to` | `".env"` | Env file `rotate-key add` writes to (`--to` overrides) |
 | `restart.launchd` | `[]` | LaunchAgent labels to restart after a rotation |
 | `restart.pm2` | `"auto"` | Restart pm2 processes whose environment has the key |
 | `restart.commands` | `[]` | Any other commands to run afterwards |

@@ -10,6 +10,9 @@ extra_files = ["~/.config/*/config.toml", "~/.config/my-cli/credentials.json"]
 # Copies inside these folders are reported but never rewritten.
 backup_dirs = ["state-snapshots", "backups", "backup"]
 
+# Env file that `rotate-key add NAME` appends new keys to (`--to FILE` overrides).
+add_to = "~/.env"
+
 [restart]
 # LaunchAgent labels restarted after a rotation (launchctl kickstart -k).
 launchd = ["com.example.my-agent"]

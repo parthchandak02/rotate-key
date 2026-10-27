@@ -5,6 +5,7 @@ replace one everywhere in a single step, and catch the habits that leak keys.
   rotate-key                       list every secret, its copies, and whether it still works
   rotate-key NAME                  rotate NAME: prompt (hidden), verify, replace every copy, restart services
   rotate-key NAME --dry-run        show what a rotation would touch
+  rotate-key add NAME [--to FILE]  add a new key: prompt (hidden), verify, append to one env file
   rotate-key check [NAME]          only run the provider checks
   rotate-key doctor [--fix]        machine hygiene: file permissions, git, iCloud, shell history, ssh, firewall
 
@@ -44,6 +45,7 @@ DEFAULTS = {
     "skip_dirs": ["node_modules", ".git", ".venv", "venv", "__pycache__", "dist", "build", ".next",
                   "Library", ".Trash", ".cache", ".npm", ".cargo", ".rustup", "go", ".pyenv", ".nvm"],
     "backup_dirs": ["state-snapshots", "backups", "backup"],   # copies here are reported, not rewritten
+    "add_to": ".env",                     # env file `rotate-key add` writes to
     "restart": {"launchd": [], "pm2": "auto", "commands": []},
     "checks": {},
 }
@@ -219,9 +221,19 @@ def run_check(name: str, value: str, cfg: dict) -> str:
         detail = e.read(2048).decode(errors="ignore")
         if re.search(r"API_KEY_INVALID|invalid[ _-]?(api[ _-]?)?key|unauthori[sz]ed|expired", detail, re.I):
             return "REJECTED"
+        if re.search(r"not scoped to a workspace", detail, re.I):
+            return "WRONG SCOPE"   # Anthropic org-scoped key: needs a workspace-scoped key
         return "out of credit" if e.code == 402 else f"HTTP {e.code}"
     except Exception as e:  # noqa: BLE001
         return f"unreachable ({type(e).__name__})"
+
+
+def refuse_new_key(name: str, status: str):
+    """Stop before writing a new key the provider won't accept. Network trouble and 5xx still pass."""
+    if status == "WRONG SCOPE":
+        sys.exit(f"This {name} is organization-scoped. Create a key scoped to a workspace and try again. Nothing changed.")
+    if status == "REJECTED" or re.fullmatch(r"HTTP 4\d\d", status) and status != "HTTP 429":
+        sys.exit(f"The provider rejected this {name} ({status}). Nothing changed.")
 
 
 # ------------------------------------------------------------------ commands
@@ -310,8 +322,7 @@ def cmd_rotate(cfg: dict, name: str, dry: bool, pick: str | None):
     if new == old:
         sys.exit("Same as the current value. Nothing changed.")
     status = run_check(name, new, cfg)
-    if status == "REJECTED":
-        sys.exit(f"The provider rejected the new {name}. Nothing changed.")
+    refuse_new_key(name, status)
     print(f"New key check: {status}")
 
     stamp = STATE / time.strftime("%Y%m%d-%H%M%S")
@@ -329,6 +340,45 @@ def cmd_rotate(cfg: dict, name: str, dry: bool, pick: str | None):
     restart_services(name, new, cfg)
     print(f"\nDone. Backups of changed files: {short(stamp)} (delete after you've confirmed things work).")
     print("Revoke the old key at the provider, then open a new terminal tab.")
+
+
+def cmd_add(cfg: dict, name: str, to: str | None):
+    target = Path(os.path.expanduser(to or cfg["add_to"])).resolve()
+    text = target.read_text(errors="ignore") if target.exists() else ""
+    for line in text.splitlines():
+        m = ENV_LINE.match(line.strip())
+        if m and m.group(1) == name:
+            sys.exit(f"{name} is already set in {short(target)}. To replace it everywhere: rotate-key {name}")
+
+    new = getpass.getpass(f"Value for {name} (hidden): ").strip().strip('"').strip("'")
+    if len(new) < 12:
+        sys.exit("Too short to be an API key. Nothing changed.")
+    status = run_check(name, new, cfg)
+    refuse_new_key(name, status)
+    print(f"Key check: {status}")
+
+    if target.exists():
+        stamp = STATE / time.strftime("%Y%m%d-%H%M%S")
+        stamp.mkdir(parents=True, exist_ok=True)
+        for d in (STATE, stamp):
+            os.chmod(d, 0o700)
+        dest = stamp / str(target).lstrip("/").replace("/", "__")
+        shutil.copy2(target, dest)
+        os.chmod(dest, 0o600)
+        print("backed up", short(target), "->", short(stamp))
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.touch(mode=0o600)
+    sep = "" if not text or text.endswith("\n") else "\n"
+    target.write_text(f"{text}{sep}{name}={new}\n")
+    os.chmod(target, 0o600)
+    print(f"added {name} ({fingerprint(new)}) to {short(target)}")
+
+    top = subprocess.run(["git", "-C", str(target.parent), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if top.returncode == 0 and subprocess.run(["git", "-C", top.stdout.strip(), "check-ignore", "-q", str(target)],
+                                              capture_output=True).returncode != 0:
+        print(f"warning: {short(target)} is not git-ignored; add it to .gitignore")
+    print("Restart whatever should read it (or open a new terminal tab).")
 
 
 # ------------------------------------------------------------------ doctor
@@ -477,7 +527,7 @@ def doctor(cfg: dict, fix: bool):
 
 def main():
     argv = sys.argv[1:]
-    if argv and argv[0] not in ("list", "check", "doctor", "rotate", "-h", "--help") and not argv[0].startswith("-"):
+    if argv and argv[0] not in ("list", "check", "doctor", "rotate", "add", "-h", "--help") and not argv[0].startswith("-"):
         argv = ["rotate"] + argv
     ap = argparse.ArgumentParser(prog="rotate-key", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
@@ -488,6 +538,9 @@ def main():
     r.add_argument("name")
     r.add_argument("--dry-run", action="store_true")
     r.add_argument("--id", help="which value, when a name has several (from `rotate-key list`)")
+    n = sub.add_parser("add", help="add a new key to one env file")
+    n.add_argument("name")
+    n.add_argument("--to", help="env file to add it to (default: add_to in the config, else ./.env)")
     d = sub.add_parser("doctor", help="machine hygiene checks")
     d.add_argument("--fix", action="store_true", help="chmod loose files, scrub secrets from shell history")
     a = ap.parse_args(argv)
@@ -498,6 +551,8 @@ def main():
         cmd_list(cfg, only=a.name)
     elif a.cmd == "rotate":
         cmd_rotate(cfg, a.name.upper(), a.dry_run, a.id)
+    elif a.cmd == "add":
+        cmd_add(cfg, a.name.upper(), a.to)
     elif a.cmd == "doctor":
         doctor(cfg, a.fix)
 
